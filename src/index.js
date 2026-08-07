@@ -11,8 +11,38 @@ const CPBL_ORIGINS = [
   "http://203.66.32.104",
   "http://203.66.32.201",
 ];
-const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X) CPBL-Live-Dashboard/0.3";
+const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36";
 const REMINDERS_KEY = "reminders";
+
+function browserHeaders({ ajax = false, referer = `${CPBL_PUBLIC}/`, includeOrigin = false } = {}) {
+  return {
+    "User-Agent": UA,
+    "Accept": ajax ? "application/json, text/javascript, */*; q=0.01" : "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.7",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "Referer": referer,
+    ...(includeOrigin ? { "Origin": CPBL_PUBLIC } : {}),
+    ...(ajax ? {
+      "X-Requested-With": "XMLHttpRequest",
+      "Sec-Fetch-Site": "same-origin",
+      "Sec-Fetch-Mode": "cors",
+      "Sec-Fetch-Dest": "empty",
+    } : {
+      "Sec-Fetch-Site": "none",
+      "Sec-Fetch-Mode": "navigate",
+      "Sec-Fetch-Dest": "document",
+      "Upgrade-Insecure-Requests": "1",
+    }),
+  };
+}
+
+function cookieNames(cookieHeader) {
+  return String(cookieHeader || "")
+    .split(";")
+    .map((x) => x.trim().split("=")[0])
+    .filter(Boolean);
+}
 
 const TEAM_COLORS = {
   AAA011: "#c8102e",
@@ -180,9 +210,11 @@ async function postCpblViaProxy(env, path, payload) {
 
 async function cpblSession() {
   const response = await fetchCpbl("/", {
-    headers: { "User-Agent": UA, "Accept-Language": "zh-TW,zh;q=0.9" },
+    redirect: "manual",
+    headers: browserHeaders(),
   });
   const html = await response.text();
+  if (!response.ok) throw new Error(`CPBL 首頁回應 ${response.status}`);
   const token = inputValue(html, "__RequestVerificationToken");
   if (!token) throw new Error("找不到 CPBL 驗證 token，網站格式可能改了");
   return { token, cookie: cookiesFrom(response) };
@@ -201,11 +233,8 @@ async function postCpbl(env, path, payload) {
       redirect: "manual",
       body,
       headers: {
-        "User-Agent": UA,
-        "Accept-Language": "zh-TW,zh;q=0.9",
+        ...browserHeaders({ ajax: true, referer: `${CPBL_PUBLIC}/`, includeOrigin: true }),
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "X-Requested-With": "XMLHttpRequest",
-        Referer: `${CPBL_PUBLIC}/`,
         ...(cookie ? { Cookie: cookie } : {}),
       },
     });
@@ -593,6 +622,69 @@ async function markReminderSent(env, id) {
   return items;
 }
 
+
+async function debugCpbl() {
+  const result = {
+    ok: false,
+    service: "Leokuo API / CPBL debug",
+    time: nowText(),
+    steps: {},
+  };
+
+  try {
+    const home = await fetchCpbl("/", { redirect: "manual", headers: browserHeaders() });
+    const homeText = await home.text();
+    const token = inputValue(homeText, "__RequestVerificationToken");
+    const cookie = cookiesFrom(home);
+    result.steps.home = {
+      status: home.status,
+      ok: home.ok,
+      contentType: home.headers.get("content-type") || "",
+      server: home.headers.get("server") || "",
+      tokenFound: Boolean(token),
+      cookieNames: cookieNames(cookie),
+      bodyPreview: stripHtml(homeText).slice(0, 180),
+    };
+
+    if (!home.ok || !token) {
+      result.error = !home.ok ? `CPBL 首頁回應 ${home.status}` : "首頁成功，但找不到驗證 token";
+      return result;
+    }
+
+    const body = new URLSearchParams({
+      __RequestVerificationToken: token,
+      GameSno: "",
+      KindCode: "",
+      GameDate: "",
+    });
+    const post = await fetchCpbl("/home/getdetaillist", {
+      method: "POST",
+      redirect: "manual",
+      body,
+      headers: {
+        ...browserHeaders({ ajax: true, referer: `${CPBL_PUBLIC}/`, includeOrigin: true }),
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        ...(cookie ? { Cookie: cookie } : {}),
+      },
+    });
+    const postText = await post.text();
+    result.steps.gamesPost = {
+      status: post.status,
+      ok: post.ok,
+      contentType: post.headers.get("content-type") || "",
+      server: post.headers.get("server") || "",
+      location: post.headers.get("location") || "",
+      bodyPreview: stripHtml(postText).slice(0, 300),
+    };
+    result.ok = post.ok;
+    if (!post.ok) result.error = `CPBL games POST 回應 ${post.status}`;
+    return result;
+  } catch (error) {
+    result.error = error?.message || String(error);
+    return result;
+  }
+}
+
 async function handleRequest(request, env) {
   const url = new URL(request.url);
 
@@ -618,10 +710,13 @@ async function handleRequest(request, env) {
         version: "1.0.0",
         module: "cpbl",
         time: nowText(),
-        endpoints: ["/cpbl/games", "/cpbl/game", "/cpbl/reminders", "/cpbl/health"],
+        endpoints: ["/cpbl/games", "/cpbl/game", "/cpbl/reminders", "/cpbl/health", "/cpbl/debug"],
         kvConfigured: Boolean(env.CPBL_REMINDERS),
         proxyConfigured: Boolean(proxyBaseUrl(env)),
       });
+    }
+    if (request.method === "GET" && apiPath === "/debug") {
+      return jsonResponse(await debugCpbl());
     }
     if (request.method === "GET" && apiPath === "/games") {
       const result = await fetchGames(env, url.searchParams.get("date") || "", url.searchParams.get("first") !== "0");

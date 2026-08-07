@@ -24,3 +24,12 @@ Build command 留空；Deploy command `npx wrangler deploy`；Root directory 留
 
 ## PDF
 舊 Python 版用 pypdf 做 PDF 文字抽取；本 Worker 版目前不提供伺服器端 PDF 解析。CSV/TXT/JSON 匯入仍可用。
+
+
+## Debug 版測試
+部署後依序測試：
+1. `https://api.leokuo.com/cpbl/health`
+2. `https://api.leokuo.com/cpbl/debug`
+3. `https://api.leokuo.com/cpbl/games`
+
+`/cpbl/debug` 不會回傳 token 或 cookie 值，只顯示是否取得、cookie 名稱、HTTP 狀態與短版回應預覽。
