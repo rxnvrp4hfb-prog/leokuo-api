@@ -921,6 +921,16 @@ async function probe(url, validate = (response) => response.ok) {
   }
 }
 
+async function probeWithRetry(url, validate, attempts = 3) {
+  let result;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    result = await probe(url, validate);
+    if (result.ok) return { ...result, attempts: attempt };
+    if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  return { ...result, detail: `${result.detail}｜已重試 ${attempts} 次`, attempts };
+}
+
 async function monitorServices(env) {
   if (!env.LOGIN_LOG_STATE) throw new Error("Monitor state KV is unavailable");
   const checks = [
@@ -937,7 +947,7 @@ async function monitorServices(env) {
     {
       id: "api-health",
       name: "api.leokuo.com｜API 主服務",
-      run: () => probe("https://api.leokuo.com/cpbl/health", (response, body) => {
+      run: () => probeWithRetry("https://api.leokuo.com/cpbl/health", (response, body) => {
         if (!response.ok) return false;
         try { return JSON.parse(body).ok === true; } catch { return false; }
       }),
@@ -953,20 +963,29 @@ async function monitorServices(env) {
     checks.push({
       id: "cpbl-api",
       name: "api.leokuo.com｜CPBL 比賽資料／Vercel Proxy",
-      run: () => probe("https://api.leokuo.com/cpbl/games?ping=1", (response, body) => {
+      run: () => probeWithRetry("https://api.leokuo.com/cpbl/games?ping=1", (response, body) => {
         if (!response.ok) return false;
         try { return JSON.parse(body).ok === true; } catch { return false; }
       }),
     });
+  } else {
+    const key = "service-monitor:cpbl-api";
+    const previous = await env.LOGIN_LOG_STATE.get(key, "json");
+    await env.LOGIN_LOG_STATE.put(key, JSON.stringify({ ok: true, state: "sleeping", checkedAt: new Date().toISOString() }));
+    if (previous?.state !== "sleeping") {
+      await postDiscordMonitor(env, `🌙 服務休眠中\n項目：api.leokuo.com｜CPBL 比賽資料／Vercel Proxy\n結果：依排程暫停資料抓取（01:00–13:00）\n時間：${nowText()}`);
+    }
   }
 
   for (const check of checks) {
     const result = await check.run();
     const key = `service-monitor:${check.id}`;
     const previous = await env.LOGIN_LOG_STATE.get(key, "json");
-    await env.LOGIN_LOG_STATE.put(key, JSON.stringify({ ok: result.ok, checkedAt: new Date().toISOString() }));
-    if ((!result.ok && previous?.ok !== false) || (result.ok && previous?.ok === false)) {
-      const status = result.ok ? "✅ 服務已恢復" : "🚨 服務異常";
+    const state = result.ok ? "healthy" : "unhealthy";
+    const previousState = previous?.state || (previous?.ok === false ? "unhealthy" : previous?.ok === true ? "healthy" : "unknown");
+    await env.LOGIN_LOG_STATE.put(key, JSON.stringify({ ok: result.ok, state, checkedAt: new Date().toISOString() }));
+    if ((!result.ok && previousState !== "unhealthy") || (result.ok && previousState === "unhealthy") || (result.ok && previousState === "sleeping")) {
+      const status = previousState === "sleeping" && result.ok ? "☀️ 服務已啟動" : result.ok ? "✅ 服務已恢復" : "🚨 服務異常";
       await postDiscordMonitor(env, `${status}\n項目：${check.name}\n結果：${result.detail}\n時間：${nowText()}`);
     }
   }
