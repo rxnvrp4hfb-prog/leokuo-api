@@ -2,6 +2,10 @@ name = "leokuo-api"
 main = "src/index.js"
 compatibility_date = "2026-08-07"
 workers_dev = true
+routes = [
+  { pattern = "api.leokuo.com", custom_domain = true },
+  { pattern = "www.api.leokuo.com", custom_domain = true }
+]
 
 [triggers]
 crons = ["*/5 * * * *"]
