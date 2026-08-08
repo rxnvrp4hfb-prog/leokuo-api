@@ -1,16 +1,7 @@
-const CPBL_PUBLIC = "https://www.cpbl.com.tw";
-const CPBL_HOST = "www.cpbl.com.tw";
-const CPBL_RESOLVE_OVERRIDE = "www-cpbl.cdn.hinet.net";
-const CPBL_ORIGINS = [
-  "http://203.66.32.193",
-  "http://203.66.32.195",
-  "http://203.66.32.66",
-  "http://203.66.35.76",
-  "http://203.66.35.100",
-  "http://203.66.32.198",
-  "http://203.66.32.104",
-  "http://203.66.32.201",
-];
+// The www host is served through a CDN path that loops Worker-originated POSTs
+// back through Cloudflare and returns 404 after its cookie challenge. The
+// official apex host reaches CPBL's origin directly and exposes the same API.
+const CPBL_PUBLIC = "https://cpbl.com.tw";
 const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36";
 const REMINDERS_KEY = "reminders";
 
@@ -153,39 +144,11 @@ function mergeCookies(...cookieStrings) {
 }
 
 async function fetchCpbl(path, init = {}) {
-  let lastResponse = null;
-  let lastError = null;
-  try {
-    const directResponse = await fetch(`${CPBL_PUBLIC}${path}`, {
-      ...init,
-      cf: {
-        ...(init.cf || {}),
-        resolveOverride: CPBL_RESOLVE_OVERRIDE,
-      },
-      headers: init.headers || {},
-    });
-    lastResponse = directResponse;
-    if (![403, 404, 502, 503, 504].includes(directResponse.status)) return directResponse;
-  } catch (error) {
-    lastError = error;
-  }
-  for (const origin of CPBL_ORIGINS) {
-    try {
-      const response = await fetch(`${origin}${path}`, {
-        ...init,
-        headers: {
-          Host: CPBL_HOST,
-          ...(init.headers || {}),
-        },
-      });
-      lastResponse = response;
-      if (![403, 404, 502, 503, 504].includes(response.status)) return response;
-    } catch (error) {
-      lastError = error;
-    }
-  }
-  if (lastResponse) return lastResponse;
-  throw lastError || new Error("CPBL 來源無法連線");
+  return fetch(`${CPBL_PUBLIC}${path}`, {
+    ...init,
+    headers: init.headers || {},
+    redirect: init.redirect || "follow",
+  });
 }
 
 function proxyBaseUrl(env) {
@@ -209,40 +172,83 @@ async function postCpblViaProxy(env, path, payload) {
 }
 
 async function cpblSession() {
-  const response = await fetchCpbl("/", {
-    redirect: "manual",
-    headers: browserHeaders(),
-  });
-  const html = await response.text();
-  if (!response.ok) throw new Error(`CPBL 首頁回應 ${response.status}`);
-  const token = inputValue(html, "__RequestVerificationToken");
-  if (!token) throw new Error("找不到 CPBL 驗證 token，網站格式可能改了");
-  return { token, cookie: cookiesFrom(response) };
+  let token = "";
+  let cookie = "";
+  let lastStatus = 0;
+
+  // HiNet CDN may answer the first Worker request with 308 and a __chtcdn
+  // cookie. It is a cookie challenge, not a useful redirect: retry the same
+  // canonical URL with the accumulated cookie jar.
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    const response = await fetchCpbl("/", {
+      redirect: "manual",
+      headers: {
+        ...browserHeaders(),
+        ...(cookie ? { Cookie: cookie } : {}),
+      },
+    });
+
+    lastStatus = response.status;
+    const html = await response.text();
+    cookie = mergeCookies(cookie, cookiesFrom(response));
+
+    if (response.ok) token = inputValue(html, "__RequestVerificationToken") || token;
+
+    if (token) break;
+  }
+
+  if (!token) {
+    throw new Error(`找不到 CPBL 驗證 token（最後首頁狀態 ${lastStatus || "unknown"}）`);
+  }
+
+  return { token, cookie };
 }
 
 async function postCpbl(env, path, payload) {
   if (proxyBaseUrl(env)) return postCpblViaProxy(env, path, payload);
 
-  const session = await cpblSession();
-  let cookie = session.cookie;
-  let response = null;
-  for (let i = 0; i < 3; i++) {
-    const body = new URLSearchParams({ __RequestVerificationToken: session.token, ...payload });
-    response = await fetchCpbl(path, {
-      method: "POST",
-      redirect: "manual",
-      body,
-      headers: {
-        ...browserHeaders({ ajax: true, referer: `${CPBL_PUBLIC}/`, includeOrigin: true }),
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        ...(cookie ? { Cookie: cookie } : {}),
-      },
-    });
-    cookie = mergeCookies(cookie, cookiesFrom(response));
-    if (response.status !== 308 && response.status !== 301 && response.status !== 302 && response.status !== 307) break;
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const session = await cpblSession();
+      let cookie = session.cookie;
+
+      for (let challengeAttempt = 1; challengeAttempt <= 4; challengeAttempt++) {
+        const response = await fetchCpbl(path, {
+          method: "POST",
+          redirect: "manual",
+          body: new URLSearchParams({
+            __RequestVerificationToken: session.token,
+            ...payload,
+          }),
+          headers: {
+            ...browserHeaders({
+              ajax: true,
+              referer: `${CPBL_PUBLIC}/`,
+              includeOrigin: true,
+            }),
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            ...(cookie ? { Cookie: cookie } : {}),
+          },
+        });
+
+        cookie = mergeCookies(cookie, cookiesFrom(response));
+        if (response.ok) return response.json();
+
+        const preview = await response.text().catch(() => "");
+        lastError = new Error(
+          `CPBL API 回應 ${response.status}${preview ? `：${stripHtml(preview).slice(0, 160)}` : ""}`,
+        );
+
+        if (![301, 302, 307, 308].includes(response.status)) break;
+      }
+    } catch (error) {
+      lastError = error;
+    }
   }
-  if (!response?.ok) throw new Error(`CPBL API 回應 ${response?.status || "unknown"}`);
-  return response.json();
+
+  throw lastError || new Error("CPBL API 請求失敗");
 }
 
 async function postCpblLive(env, year, kindCode, gameSno) {
@@ -626,58 +632,92 @@ async function markReminderSent(env, id) {
 async function debugCpbl() {
   const result = {
     ok: false,
-    service: "Leokuo API / CPBL debug",
+    service: "Leokuo API / CPBL debug v4",
+    version: "4.1.0",
     time: nowText(),
     steps: {},
   };
 
+  const pickHeaders = (response) => ({
+    server: response.headers.get("server") || "",
+    cfRay: response.headers.get("cf-ray") || "",
+    cfCacheStatus: response.headers.get("cf-cache-status") || "",
+    contentType: response.headers.get("content-type") || "",
+    location: response.headers.get("location") || "",
+    setCookiePresent: Boolean(response.headers.get("set-cookie")),
+  });
+
   try {
-    const home = await fetchCpbl("/", { redirect: "manual", headers: browserHeaders() });
+    // Step 1: CPBL homepage
+    const home = await fetchCpbl("/", {
+      redirect: "manual",
+      headers: browserHeaders(),
+    });
     const homeText = await home.text();
     const token = inputValue(homeText, "__RequestVerificationToken");
     const cookie = cookiesFrom(home);
+
     result.steps.home = {
       status: home.status,
       ok: home.ok,
-      contentType: home.headers.get("content-type") || "",
-      server: home.headers.get("server") || "",
       tokenFound: Boolean(token),
       cookieNames: cookieNames(cookie),
-      bodyPreview: stripHtml(homeText).slice(0, 180),
+      ...pickHeaders(home),
+      bodyPreview: stripHtml(homeText).slice(0, 220),
     };
 
     if (!home.ok || !token) {
-      result.error = !home.ok ? `CPBL 首頁回應 ${home.status}` : "首頁成功，但找不到驗證 token";
+      result.error = !home.ok
+        ? `CPBL 首頁回應 ${home.status}`
+        : "首頁成功，但找不到 __RequestVerificationToken";
       return result;
     }
 
+    // Step 2: POST exactly to the official hostname only.
     const body = new URLSearchParams({
       __RequestVerificationToken: token,
       GameSno: "",
       KindCode: "",
       GameDate: "",
     });
+
     const post = await fetchCpbl("/home/getdetaillist", {
       method: "POST",
       redirect: "manual",
       body,
       headers: {
-        ...browserHeaders({ ajax: true, referer: `${CPBL_PUBLIC}/`, includeOrigin: true }),
+        ...browserHeaders({
+          ajax: true,
+          referer: `${CPBL_PUBLIC}/`,
+          includeOrigin: true,
+        }),
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
         ...(cookie ? { Cookie: cookie } : {}),
       },
     });
+
     const postText = await post.text();
+
     result.steps.gamesPost = {
       status: post.status,
       ok: post.ok,
-      contentType: post.headers.get("content-type") || "",
-      server: post.headers.get("server") || "",
-      location: post.headers.get("location") || "",
-      bodyPreview: stripHtml(postText).slice(0, 300),
+      cookieSent: Boolean(cookie),
+      cookieNames: cookieNames(cookie),
+      ...pickHeaders(post),
+      bodyPreview: stripHtml(postText).slice(0, 360),
     };
+
     result.ok = post.ok;
-    if (!post.ok) result.error = `CPBL games POST 回應 ${post.status}`;
+
+    if (!post.ok) {
+      result.error = `CPBL games POST 回應 ${post.status}`;
+
+      if (/error code:\s*1003/i.test(postText)) {
+        result.hint =
+          "上游回傳 Cloudflare Error 1003。v4 已完全移除直接 IP、Host override 與 resolveOverride；若仍出現 1003，代表問題不是舊的 IP fallback，而是上游對這類 Worker POST 的限制。";
+      }
+    }
+
     return result;
   } catch (error) {
     result.error = error?.message || String(error);
@@ -707,7 +747,7 @@ async function handleRequest(request, env) {
       return jsonResponse({
         ok: true,
         service: "Leokuo API",
-        version: "1.0.0",
+        version: "4.1.0",
         module: "cpbl",
         time: nowText(),
         endpoints: ["/cpbl/games", "/cpbl/game", "/cpbl/reminders", "/cpbl/health", "/cpbl/debug"],
