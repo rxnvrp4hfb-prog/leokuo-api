@@ -956,7 +956,7 @@ async function sendMonitorTest(env) {
     `baseball.leokuo.com｜程式來源：${mark(source)}`,
     `api.leokuo.com｜API 主服務：${mark(api)}`,
     `runofshow.leokuo.com｜網站首頁：${mark(runshow)}`,
-    `api.leokuo.com｜CPBL 比賽資料：${sleeping ? "🌙 休眠中（01:00–13:00）" : "☀️ 運作時段"}`,
+    `api.leokuo.com｜CPBL 比賽資料：${!api.ok ? "🚨 異常（主服務無法連線）" : sleeping ? "🌙 休眠中（01:00–13:00）" : "☀️ 運作時段"}`,
   ];
   await postDiscordMonitor(env, `🧪 系統狀態測試\n${lines.join("\n")}\n時間：${nowText()}\n\n此訊息僅供測試，不會改變異常紀錄。`);
 }
@@ -998,17 +998,12 @@ async function monitorServices(env) {
         try { return JSON.parse(body).ok === true; } catch { return false; }
       }),
     });
-  } else {
-    const key = "service-monitor:cpbl-api";
-    const previous = await env.LOGIN_LOG_STATE.get(key, "json");
-    await env.LOGIN_LOG_STATE.put(key, JSON.stringify({ ok: true, state: "sleeping", checkedAt: new Date().toISOString() }));
-    if (previous?.state !== "sleeping") {
-      await postDiscordMonitor(env, `🌙 服務休眠中\n項目：api.leokuo.com｜CPBL 比賽資料／Vercel Proxy\n結果：依排程暫停資料抓取（01:00–13:00）\n時間：${nowText()}`);
-    }
   }
 
+  let apiHealthy = false;
   for (const check of checks) {
     const result = await check.run();
+    if (check.id === "api-health") apiHealthy = result.ok;
     const key = `service-monitor:${check.id}`;
     const previous = await env.LOGIN_LOG_STATE.get(key, "json");
     const state = result.ok ? "healthy" : "unhealthy";
@@ -1017,6 +1012,17 @@ async function monitorServices(env) {
     if ((!result.ok && previousState !== "unhealthy") || (result.ok && previousState === "unhealthy") || (result.ok && previousState === "sleeping")) {
       const status = previousState === "sleeping" && result.ok ? "☀️ 服務已啟動" : result.ok ? "✅ 服務已恢復" : "🚨 服務異常";
       await postDiscordMonitor(env, `${status}\n項目：${check.name}\n結果：${result.detail}\n時間：${nowText()}`);
+    }
+  }
+
+  if (hour >= 1 && hour < 13) {
+    const key = "service-monitor:cpbl-api";
+    const previous = await env.LOGIN_LOG_STATE.get(key, "json");
+    const previousState = previous?.state || (previous?.ok === false ? "unhealthy" : previous?.ok === true ? "healthy" : "unknown");
+    const state = apiHealthy ? "sleeping" : "unhealthy";
+    await env.LOGIN_LOG_STATE.put(key, JSON.stringify({ ok: apiHealthy, state, checkedAt: new Date().toISOString() }));
+    if (apiHealthy && previousState !== "sleeping" && previousState !== "unhealthy") {
+      await postDiscordMonitor(env, `🌙 服務休眠中\n項目：api.leokuo.com｜CPBL 比賽資料／Vercel Proxy\n結果：依排程暫停資料抓取（01:00–13:00）\n時間：${nowText()}`);
     }
   }
 }
