@@ -743,6 +743,14 @@ async function handleRequest(request, env) {
   const apiPath = url.pathname.replace(/^\/cpbl/, "") || "/";
 
   try {
+    if (request.method === "POST" && apiPath === "/admin/monitor-test") {
+      const supplied = request.headers.get("Authorization")?.replace(/^Bearer\s+/i, "") || "";
+      const expected = await env.LOGIN_LOG_STATE?.get("service-monitor:test-token");
+      if (!expected || supplied !== expected) return jsonResponse({ ok: false, error: "not found" }, 404);
+      await env.LOGIN_LOG_STATE.delete("service-monitor:test-token");
+      await sendMonitorTest(env);
+      return jsonResponse({ ok: true });
+    }
     if (request.method === "POST" && apiPath === "/admin/register-runshow-commands") {
       if (!env.LOGIN_SYNC_SECRET || request.headers.get("Authorization") !== `Bearer ${env.LOGIN_SYNC_SECRET}`) return jsonResponse({ ok: false, error: "unauthorized" }, 401);
       if (!env.DISCORD_BOT_TOKEN || !env.DISCORD_APPLICATION_ID || !env.DISCORD_GUILD_ID) return jsonResponse({ ok: false, error: "Discord command settings are incomplete" }, 503);
@@ -929,6 +937,28 @@ async function probeWithRetry(url, validate, attempts = 3) {
     if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, 1000));
   }
   return { ...result, detail: `${result.detail}｜已重試 ${attempts} 次`, attempts };
+}
+
+async function sendMonitorTest(env) {
+  const sleeping = taipeiHour() >= 1 && taipeiHour() < 13;
+  const [baseball, source, api, runshow] = await Promise.all([
+    probe("https://baseball.leokuo.com/"),
+    probe("https://raw.githubusercontent.com/rxnvrp4hfb-prog/cpbl-baseball/main/index.html", (response, body) => response.ok && body.includes("CPBL")),
+    probeWithRetry("https://api.leokuo.com/cpbl/health", (response, body) => {
+      if (!response.ok) return false;
+      try { return JSON.parse(body).ok === true; } catch { return false; }
+    }),
+    probe("https://runofshow.leokuo.com/", (response, body) => response.ok && (body.includes("活動流程") || body.includes("登入"))),
+  ]);
+  const mark = (result) => result.ok ? "✅ 正常" : `🚨 異常（${result.detail}）`;
+  const lines = [
+    `baseball.leokuo.com｜網站入口：${mark(baseball)}`,
+    `baseball.leokuo.com｜程式來源：${mark(source)}`,
+    `api.leokuo.com｜API 主服務：${mark(api)}`,
+    `runofshow.leokuo.com｜網站首頁：${mark(runshow)}`,
+    `api.leokuo.com｜CPBL 比賽資料：${sleeping ? "🌙 休眠中（01:00–13:00）" : "☀️ 運作時段"}`,
+  ];
+  await postDiscordMonitor(env, `🧪 系統狀態測試\n${lines.join("\n")}\n時間：${nowText()}\n\n此訊息僅供測試，不會改變異常紀錄。`);
 }
 
 async function monitorServices(env) {
