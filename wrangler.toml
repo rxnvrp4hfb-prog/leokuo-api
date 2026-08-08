@@ -2,3 +2,16 @@ name = "leokuo-api"
 main = "src/index.js"
 compatibility_date = "2026-08-07"
 workers_dev = true
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[vars]
+CLOUDFLARE_ACCOUNT_ID = "dfab7808c21c37a1b409cb05abf68979"
+CLOUDFLARE_ACCESS_APP_ID = "27bb2f67-17c4-48e5-9ba6-19270d78412b"
+DISCORD_LOGIN_CHANNEL_ID = "1535581482247258162"
+DISCORD_MONITOR_CHANNEL_ID = "1535681082555375738"
+
+[[kv_namespaces]]
+binding = "LOGIN_LOG_STATE"
+id = "b857a1b3a14b4d1088f749c61d7a6358"

@@ -743,19 +743,37 @@ async function handleRequest(request, env) {
   const apiPath = url.pathname.replace(/^\/cpbl/, "") || "/";
 
   try {
-    if (request.method === "GET" && (apiPath === "/" || apiPath === "/health")) {
+    if (request.method === "POST" && apiPath === "/admin/runshow-reminder") {
+      if (!env.RUNSHOW_NOTIFY_SECRET || request.headers.get("Authorization") !== `Bearer ${env.RUNSHOW_NOTIFY_SECRET}`) return jsonResponse({ ok: false, error: "not found" }, 404);
+      if (!env.DISCORD_BOT_TOKEN) return jsonResponse({ ok: false, error: "Discord unavailable" }, 503);
+      const discordResponse = await fetch("https://discord.com/api/v10/channels/1535607596441018458/messages", {
+        method: "POST",
+        headers: { Authorization: `Bot ${env.DISCORD_BOT_TOKEN}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ content: "🔔 **Runshow 流程表提醒**\n有工作人員提醒：管理員尚未發布本場流程表。\nhttps://runofshow.leokuo.com", allowed_mentions: { parse: [] } }),
+      });
+      return discordResponse.ok ? jsonResponse({ ok: true }) : jsonResponse({ ok: false, error: `Discord ${discordResponse.status}` }, 502);
+    }
+    if (request.method === "POST" && apiPath === "/admin/sync-login-logs") {
+      if (!env.LOGIN_SYNC_SECRET || request.headers.get("Authorization") !== `Bearer ${env.LOGIN_SYNC_SECRET}`) {
+        return jsonResponse({ ok: false, error: "unauthorized" }, 401);
+      }
+      const sent = await syncAccessLoginLogs(env);
+      return jsonResponse({ ok: true, sent });
+    }
+    // Do not advertise implementation details or available routes at the API root.
+    if (request.method === "GET" && apiPath === "/") {
+      return jsonResponse({ ok: false, error: "not found" }, 404);
+    }
+    if (request.method === "GET" && apiPath === "/health") {
       return jsonResponse({
         ok: true,
-        service: "Leokuo API",
-        version: "4.1.0",
-        module: "cpbl",
         time: nowText(),
-        endpoints: ["/cpbl/games", "/cpbl/game", "/cpbl/reminders", "/cpbl/health", "/cpbl/debug"],
-        kvConfigured: Boolean(env.CPBL_REMINDERS),
-        proxyConfigured: Boolean(proxyBaseUrl(env)),
       });
     }
     if (request.method === "GET" && apiPath === "/debug") {
+      if (!env.DEBUG_TOKEN || request.headers.get("Authorization") !== `Bearer ${env.DEBUG_TOKEN}`) {
+        return jsonResponse({ ok: false, error: "not found" }, 404);
+      }
       return jsonResponse(await debugCpbl());
     }
     if (request.method === "GET" && apiPath === "/games") {
@@ -778,8 +796,160 @@ async function handleRequest(request, env) {
   }
 }
 
+function loginEventText(event) {
+  const time = new Intl.DateTimeFormat("zh-TW", {
+    timeZone: "Asia/Taipei",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(new Date(event.created_at));
+  const result = event.allowed ? "✅ 登入成功" : "❌ 登入失敗";
+  return `${result}\n帳號：${event.user_email || "未知"}\n網站：${event.app_domain || "baseball.leokuo.com"}\n時間：${time}`;
+}
+
+async function postDiscordLogin(env, event) {
+  const response = await fetch(`https://discord.com/api/v10/channels/${env.DISCORD_LOGIN_CHANNEL_ID}/messages`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bot ${env.DISCORD_BOT_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ content: loginEventText(event), allowed_mentions: { parse: [] } }),
+  });
+  if (!response.ok) throw new Error(`Discord login log failed: ${response.status}`);
+}
+
+async function syncAccessLoginLogs(env) {
+  if (!env.CLOUDFLARE_LOGS_TOKEN || !env.DISCORD_BOT_TOKEN || !env.LOGIN_LOG_STATE) {
+    throw new Error("Login log settings are incomplete");
+  }
+  const until = new Date();
+  const since = new Date(until.getTime() - 10 * 60 * 1000);
+  const query = new URLSearchParams({
+    since: since.toISOString(),
+    until: until.toISOString(),
+    direction: "asc",
+    limit: "100",
+  });
+  const response = await fetch(
+    `https://api.cloudflare.com/client/v4/accounts/${env.CLOUDFLARE_ACCOUNT_ID}/access/logs/access_requests?${query}`,
+    { headers: { Authorization: `Bearer ${env.CLOUDFLARE_LOGS_TOKEN}` } },
+  );
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || !payload.success) {
+    throw new Error(payload.errors?.[0]?.message || `Cloudflare login logs failed: ${response.status}`);
+  }
+  const events = (payload.result || []).filter((event) =>
+    event.app_uid === env.CLOUDFLARE_ACCESS_APP_ID || event.app_domain === "baseball.leokuo.com",
+  );
+  let sent = 0;
+  for (const event of events) {
+    const eventId = event.ray_id || `${event.created_at}:${event.user_email}:${event.allowed}`;
+    const key = `discord-login:${eventId}`;
+    if (await env.LOGIN_LOG_STATE.get(key)) continue;
+    await postDiscordLogin(env, event);
+    await env.LOGIN_LOG_STATE.put(key, "1", { expirationTtl: 2592000 });
+    sent += 1;
+  }
+  return sent;
+}
+
+function taipeiHour() {
+  return Number(new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Taipei",
+    hour: "2-digit",
+    hourCycle: "h23",
+  }).format(new Date()));
+}
+
+async function postDiscordMonitor(env, content) {
+  if (!env.DISCORD_BOT_TOKEN || !env.DISCORD_MONITOR_CHANNEL_ID) throw new Error("Monitor Discord settings are incomplete");
+  const response = await fetch(`https://discord.com/api/v10/channels/${env.DISCORD_MONITOR_CHANNEL_ID}/messages`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bot ${env.DISCORD_BOT_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ content, allowed_mentions: { parse: [] } }),
+  });
+  if (!response.ok) throw new Error(`Discord monitor notification failed: ${response.status}`);
+}
+
+async function probe(url, validate = (response) => response.ok) {
+  const started = Date.now();
+  try {
+    const response = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(15000) });
+    const body = await response.text();
+    const ok = await validate(response, body);
+    return { ok, detail: ok ? `${response.status}｜${Date.now() - started}ms` : `${response.status}｜${body.slice(0, 160)}` };
+  } catch (error) {
+    return { ok: false, detail: error?.message || String(error) };
+  }
+}
+
+async function monitorServices(env) {
+  if (!env.LOGIN_LOG_STATE) throw new Error("Monitor state KV is unavailable");
+  const checks = [
+    {
+      id: "baseball-site",
+      name: "baseball.leokuo.com｜公開入口／Cloudflare Access",
+      run: () => probe("https://baseball.leokuo.com/"),
+    },
+    {
+      id: "baseball-source",
+      name: "baseball.leokuo.com｜網站程式來源／GitHub",
+      run: () => probe("https://raw.githubusercontent.com/rxnvrp4hfb-prog/cpbl-baseball/main/index.html", (response, body) => response.ok && body.includes("CPBL")),
+    },
+    {
+      id: "api-health",
+      name: "api.leokuo.com｜API 主服務",
+      run: () => probe("https://api.leokuo.com/cpbl/health", (response, body) => {
+        if (!response.ok) return false;
+        try { return JSON.parse(body).ok === true; } catch { return false; }
+      }),
+    },
+    {
+      id: "runofshow-site",
+      name: "runofshow.leokuo.com｜網站首頁／登入頁",
+      run: () => probe("https://runofshow.leokuo.com/", (response, body) => response.ok && (body.includes("活動流程") || body.includes("登入"))),
+    },
+  ];
+  const hour = taipeiHour();
+  if (hour < 1 || hour >= 13) {
+    checks.push({
+      id: "cpbl-api",
+      name: "api.leokuo.com｜CPBL 比賽資料／Vercel Proxy",
+      run: () => probe("https://api.leokuo.com/cpbl/games?ping=1", (response, body) => {
+        if (!response.ok) return false;
+        try { return JSON.parse(body).ok === true; } catch { return false; }
+      }),
+    });
+  }
+
+  for (const check of checks) {
+    const result = await check.run();
+    const key = `service-monitor:${check.id}`;
+    const previous = await env.LOGIN_LOG_STATE.get(key, "json");
+    await env.LOGIN_LOG_STATE.put(key, JSON.stringify({ ok: result.ok, checkedAt: new Date().toISOString() }));
+    if ((!result.ok && previous?.ok !== false) || (result.ok && previous?.ok === false)) {
+      const status = result.ok ? "✅ 服務已恢復" : "🚨 服務異常";
+      await postDiscordMonitor(env, `${status}\n項目：${check.name}\n結果：${result.detail}\n時間：${nowText()}`);
+    }
+  }
+}
+
 export default {
   async fetch(request, env) {
     return handleRequest(request, env);
+  },
+  async scheduled(_event, env, ctx) {
+    ctx.waitUntil(Promise.allSettled([
+      syncAccessLoginLogs(env),
+      monitorServices(env),
+    ]));
   },
 };
