@@ -784,10 +784,15 @@ async function handleRequest(request, env) {
     if (request.method === "POST" && apiPath === "/admin/runshow-reminder") {
       if (!env.RUNSHOW_NOTIFY_SECRET || request.headers.get("Authorization") !== `Bearer ${env.RUNSHOW_NOTIFY_SECRET}`) return jsonResponse({ ok: false, error: "not found" }, 404);
       if (!env.DISCORD_BOT_TOKEN) return jsonResponse({ ok: false, error: "Discord unavailable" }, 503);
+      const body = await request.json().catch(() => ({}));
+      const isAdminLogin = body?.type === "admin-login";
+      const content = isAdminLogin
+        ? `🔐 **Run of Show 管理員登入**\n時間：${String(body.time || "未知")}\n地區：${String(body.country || "未知")}\nIP：${String(body.ip || "未知")}\n裝置：${String(body.device || "未知").slice(0, 180)}\nhttps://runofshow.leokuo.com`
+        : "🔔 **Runshow 流程表提醒**\n有工作人員提醒：管理員尚未發布本場流程表。\nhttps://runofshow.leokuo.com";
       const discordResponse = await fetch("https://discord.com/api/v10/channels/1535607596441018458/messages", {
         method: "POST",
         headers: { Authorization: `Bot ${env.DISCORD_BOT_TOKEN}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ content: "🔔 **Runshow 流程表提醒**\n有工作人員提醒：管理員尚未發布本場流程表。\nhttps://runofshow.leokuo.com", allowed_mentions: { parse: [] } }),
+        body: JSON.stringify({ content, allowed_mentions: { parse: [] } }),
       });
       return discordResponse.ok ? jsonResponse({ ok: true }) : jsonResponse({ ok: false, error: `Discord ${discordResponse.status}` }, 502);
     }
