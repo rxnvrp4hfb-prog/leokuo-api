@@ -395,6 +395,8 @@ function normalizeGame(g = {}) {
     homeColor: teamColor(g.HomeTeamCode, g.HomeTeamName),
     awayLogo: assetUrl(g.VisitingClubBigImgPath || g.VisitingClubSmallImgPath),
     homeLogo: assetUrl(g.HomeClubBigImgPath || g.HomeClubSmallImgPath),
+    awaySmallLogo: assetUrl(g.VisitingClubSmallImgPath || g.VisitingClubBigImgPath),
+    homeSmallLogo: assetUrl(g.HomeClubSmallImgPath || g.HomeClubBigImgPath),
     awayScore: g.VisitingTotalScore ?? g.VisitingScore,
     homeScore: g.HomeTotalScore ?? g.HomeScore,
     awayStarter: g.VisitingFirstMover || "",
