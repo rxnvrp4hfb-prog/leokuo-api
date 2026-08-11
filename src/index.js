@@ -743,44 +743,6 @@ async function handleRequest(request, env) {
   const apiPath = url.pathname.replace(/^\/cpbl/, "") || "/";
 
   try {
-    if (request.method === "POST" && apiPath === "/admin/monitor-test") {
-      const supplied = request.headers.get("Authorization")?.replace(/^Bearer\s+/i, "") || "";
-      const expected = await env.LOGIN_LOG_STATE?.get("service-monitor:test-token");
-      if (!expected || supplied !== expected) return jsonResponse({ ok: false, error: "not found" }, 404);
-      await env.LOGIN_LOG_STATE.delete("service-monitor:test-token");
-      await sendMonitorTest(env);
-      return jsonResponse({ ok: true });
-    }
-    if (request.method === "POST" && apiPath === "/admin/register-runshow-commands") {
-      if (!env.LOGIN_SYNC_SECRET || request.headers.get("Authorization") !== `Bearer ${env.LOGIN_SYNC_SECRET}`) return jsonResponse({ ok: false, error: "unauthorized" }, 401);
-      if (!env.DISCORD_BOT_TOKEN || !env.DISCORD_APPLICATION_ID || !env.DISCORD_GUILD_ID) return jsonResponse({ ok: false, error: "Discord command settings are incomplete" }, 503);
-      const option = (type, name, description, required = false) => ({ type, name, description, required });
-      const commands = [
-        { name: "allow", description: "允許 Gmail 帳號進入 CPBL 網站", options: [option(3, "email", "Email 地址", true)] },
-        { name: "remove", description: "移除 CPBL 網站允許帳號", options: [option(3, "email", "Email 地址", true)] },
-        { name: "list", description: "查看 CPBL 網站允許帳號" },
-        { name: "status", description: "立即檢查網站與 API 狀態" },
-        { name: "sync-logins", description: "立即同步新的登入紀錄" },
-        { name: "runshow-password", description: "更新 Run of Show 活動密碼", options: [option(3, "password", "新的活動密碼", true)] },
-        { name: "runshow-admin-password", description: "更新 Run of Show 管理員密碼", options: [option(3, "password", "新的管理員密碼", true)] },
-        { name: "runshow-upload", description: "發布 Run of Show 流程表", options: [option(11, "file", "PDF、CSV、TXT 或 JSON", true)] },
-        { name: "runshow-event", description: "設定活動期間與共用密碼", options: [option(3, "password", "活動密碼", true), option(3, "start", "開始時間 YYYY-MM-DD HH:mm", true), option(3, "end", "結束時間 YYYY-MM-DD HH:mm"), option(5, "continuous", "持續模式，不自動清除")] },
-        { name: "runshow-extend", description: "延長活動結束時間", options: [option(3, "end", "新的結束時間 YYYY-MM-DD HH:mm", true)] },
-        { name: "runshow-continuous", description: "開啟或關閉持續模式", options: [option(5, "enabled", "是否持續運作", true), option(3, "end", "關閉時的新結束時間 YYYY-MM-DD HH:mm")] },
-        { name: "runshow-end", description: "立即結束活動並清除流程與密碼" },
-        { name: "runshow-event-status", description: "查看活動期間、持續模式與流程表狀態" },
-      ];
-      const applicationResponse = await fetch("https://discord.com/api/v10/oauth2/applications/@me", { headers: { Authorization: `Bot ${env.DISCORD_BOT_TOKEN}` } });
-      const application = await applicationResponse.json().catch(() => ({}));
-      if (!applicationResponse.ok || !application.id) return jsonResponse({ ok: false, error: application.message || `Discord application ${applicationResponse.status}` }, 502);
-      const discordResponse = await fetch(`https://discord.com/api/v10/applications/${application.id}/commands`, {
-        method: "PUT",
-        headers: { Authorization: `Bot ${env.DISCORD_BOT_TOKEN}`, "Content-Type": "application/json" },
-        body: JSON.stringify(commands),
-      });
-      const result = await discordResponse.json().catch(() => ({}));
-      return discordResponse.ok ? jsonResponse({ ok: true, count: Array.isArray(result) ? result.length : 0 }) : jsonResponse({ ok: false, error: result.message || `Discord ${discordResponse.status}` }, 502);
-    }
     if (request.method === "POST" && apiPath === "/admin/runshow-reminder") {
       if (!env.RUNSHOW_NOTIFY_SECRET || request.headers.get("Authorization") !== `Bearer ${env.RUNSHOW_NOTIFY_SECRET}`) return jsonResponse({ ok: false, error: "not found" }, 404);
       if (!env.DISCORD_BOT_TOKEN) return jsonResponse({ ok: false, error: "Discord unavailable" }, 503);
@@ -956,25 +918,6 @@ async function probeCpblProxyWithRetry(env, attempts = 3) {
     if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, 1000));
   }
   return { ok: false, detail: `${detail}｜已重試 ${attempts} 次` };
-}
-
-async function sendMonitorTest(env) {
-  const sleeping = taipeiHour() >= 1 && taipeiHour() < 13;
-  const [baseball, source, runshow] = await Promise.all([
-    probe("https://baseball.leokuo.com/"),
-    probe("https://raw.githubusercontent.com/rxnvrp4hfb-prog/cpbl-baseball/main/index.html", (response, body) => response.ok && body.includes("CPBL")),
-    probe("https://runofshow.leokuo.com/", (response, body) => response.ok && (body.includes("活動流程") || body.includes("登入"))),
-  ]);
-  const api = { ok: true, detail: "本次測試已成功進入 API" };
-  const mark = (result) => result.ok ? "✅ 正常" : `🚨 異常（${result.detail}）`;
-  const lines = [
-    `baseball.leokuo.com｜網站入口：${mark(baseball)}`,
-    `baseball.leokuo.com｜程式來源：${mark(source)}`,
-    `api.leokuo.com｜API 主服務：${mark(api)}`,
-    `runofshow.leokuo.com｜網站首頁：${mark(runshow)}`,
-    `api.leokuo.com｜CPBL 比賽資料：${!api.ok ? "🚨 異常（主服務無法連線）" : sleeping ? "🌙 休眠中（01:00–13:00）" : "☀️ 運作時段"}`,
-  ];
-  await postDiscordMonitor(env, `🧪 系統狀態測試\n${lines.join("\n")}\n時間：${nowText()}\n\n此訊息僅供測試，不會改變異常紀錄。`);
 }
 
 async function monitorServices(env) {
