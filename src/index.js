@@ -782,8 +782,17 @@ async function handleRequest(request, env) {
       return jsonResponse(await debugCpbl());
     }
     if (request.method === "GET" && apiPath === "/games") {
-      const result = await fetchGames(env, url.searchParams.get("date") || "", url.searchParams.get("first") !== "0");
-      return jsonResponse(result, 200, "public, max-age=5, s-maxage=20");
+      const requestedDate = url.searchParams.get("date") || "";
+      const cache = caches.default;
+      const cacheKey = new Request(url.toString(), { method: "GET" });
+      const cached = await cache.match(cacheKey);
+      if (cached) return cached;
+      const result = await fetchGames(env, requestedDate, url.searchParams.get("first") !== "0");
+      const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Taipei", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+      const ttl = requestedDate && requestedDate !== today ? 21600 : 60;
+      const response = jsonResponse(result, 200, `public, max-age=${ttl}, s-maxage=${ttl}`);
+      await cache.put(cacheKey, response.clone());
+      return response;
     }
     if (request.method === "GET" && apiPath === "/game") {
       const result = await fetchGameDetail(env, url.searchParams.get("year"), url.searchParams.get("kindCode"), url.searchParams.get("gameSno"), url.searchParams.get("status") || "");
