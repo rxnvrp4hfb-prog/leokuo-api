@@ -795,8 +795,26 @@ async function handleRequest(request, env) {
       return response;
     }
     if (request.method === "GET" && apiPath === "/game") {
-      const result = await fetchGameDetail(env, url.searchParams.get("year"), url.searchParams.get("kindCode"), url.searchParams.get("gameSno"), url.searchParams.get("status") || "");
-      return jsonResponse(result, 200, "public, max-age=2, s-maxage=5");
+      const status = Number(url.searchParams.get("status") || 0);
+      const ttl = status === 2 ? 10 : status === 3 ? 21600 : 60;
+      const cache = caches.default;
+      const cacheKey = new Request(url.toString(), { method: "GET" });
+      const cached = await cache.match(cacheKey);
+      if (cached) return cached;
+      const staleUrl = new URL(url.toString());
+      staleUrl.searchParams.set("_stale", "1");
+      const staleKey = new Request(staleUrl.toString(), { method: "GET" });
+      try {
+        const result = await fetchGameDetail(env, url.searchParams.get("year"), url.searchParams.get("kindCode"), url.searchParams.get("gameSno"), url.searchParams.get("status") || "");
+        const response = jsonResponse(result, 200, `public, max-age=${ttl}, s-maxage=${ttl}`);
+        const staleResponse = jsonResponse({ ...result, staleFallback: true }, 200, "public, max-age=21600, s-maxage=21600");
+        await Promise.all([cache.put(cacheKey, response.clone()), cache.put(staleKey, staleResponse)]);
+        return response;
+      } catch (error) {
+        const stale = await cache.match(staleKey);
+        if (stale) return stale;
+        throw error;
+      }
     }
     if (request.method === "GET" && apiPath === "/reminders") return jsonResponse({ ok: true, reminders: await loadReminders(env) });
     if (request.method === "POST" && apiPath === "/reminders") return jsonResponse({ ok: true, reminder: await addReminder(env, await request.json()) });
