@@ -751,7 +751,10 @@ async function handleRequest(request, env) {
       if (!env.DISCORD_BOT_TOKEN) return jsonResponse({ ok: false, error: "Discord unavailable" }, 503);
       const body = await request.json().catch(() => ({}));
       const isAdminLogin = body?.type === "admin-login";
-      const content = isAdminLogin
+      const isPasswordAccess = body?.type === "password-access-code";
+      const content = isPasswordAccess
+        ? `🔐 **Run of Show 活動密碼驗證碼**\n驗證碼：**${String(body.code || "").replace(/\D/g, "").slice(0, 4)}**\n5 分鐘內有效，請勿轉傳。\nhttps://runofshow.leokuo.com`
+        : isAdminLogin
         ? `🔐 **Run of Show 管理員登入**\n時間：${String(body.time || "未知")}\n地區：${String(body.country || "未知")}\nIP：${String(body.ip || "未知")}\n裝置：${String(body.device || "未知").slice(0, 180)}\nhttps://runofshow.leokuo.com`
         : "🔔 **Runshow 流程表提醒**\n有工作人員提醒：管理員尚未發布本場流程表。\nhttps://runofshow.leokuo.com";
       const discordResponse = await fetch("https://discord.com/api/v10/channels/1535607596441018458/messages", {
