@@ -4,6 +4,7 @@
 const CPBL_PUBLIC = "https://cpbl.com.tw";
 const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36";
 const REMINDERS_KEY = "reminders";
+const gameFetches = new Map();
 
 function browserHeaders({ ajax = false, referer = `${CPBL_PUBLIC}/`, includeOrigin = false } = {}) {
   return {
@@ -797,17 +798,34 @@ async function handleRequest(request, env) {
       return response;
     }
     if (request.method === "GET" && apiPath === "/game") {
-      const status = Number(url.searchParams.get("status") || 0);
-      const ttl = status === 2 ? 10 : status === 3 ? 21600 : 60;
+      const year = url.searchParams.get("year") || "";
+      const kindCode = url.searchParams.get("kindCode") || "";
+      const gameSno = url.searchParams.get("gameSno") || "";
+      const requestedStatus = url.searchParams.get("status") || "";
       const cache = caches.default;
-      const cacheKey = new Request(url.toString(), { method: "GET" });
+      // All consumers share one cache entry per game. `status` is only a hint
+      // from an individual browser and must not split the upstream cache.
+      const canonicalUrl = new URL(url.origin + url.pathname);
+      canonicalUrl.searchParams.set("year", year);
+      canonicalUrl.searchParams.set("kindCode", kindCode);
+      canonicalUrl.searchParams.set("gameSno", gameSno);
+      const cacheKey = new Request(canonicalUrl.toString(), { method: "GET" });
       const cached = await cache.match(cacheKey);
       if (cached) return cached;
-      const staleUrl = new URL(url.toString());
+      const staleUrl = new URL(canonicalUrl.toString());
       staleUrl.searchParams.set("_stale", "1");
       const staleKey = new Request(staleUrl.toString(), { method: "GET" });
       try {
-        const result = await fetchGameDetail(env, url.searchParams.get("year"), url.searchParams.get("kindCode"), url.searchParams.get("gameSno"), url.searchParams.get("status") || "");
+        const fetchKey = `${year}:${kindCode}:${gameSno}`;
+        let pending = gameFetches.get(fetchKey);
+        if (!pending) {
+          pending = fetchGameDetail(env, year, kindCode, gameSno, requestedStatus)
+            .finally(() => gameFetches.delete(fetchKey));
+          gameFetches.set(fetchKey, pending);
+        }
+        const result = await pending;
+        const actualStatus = Number(result?.game?.statusCode || requestedStatus || 0);
+        const ttl = actualStatus === 2 ? 15 : actualStatus === 3 ? 21600 : 60;
         const response = jsonResponse(result, 200, `public, max-age=${ttl}, s-maxage=${ttl}`);
         const staleResponse = jsonResponse({ ...result, staleFallback: true }, 200, "public, max-age=21600, s-maxage=21600");
         await Promise.all([cache.put(cacheKey, response.clone()), cache.put(staleKey, staleResponse)]);
