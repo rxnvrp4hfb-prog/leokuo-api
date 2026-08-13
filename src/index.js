@@ -913,6 +913,17 @@ async function postDiscordMonitor(env, content) {
   if (!response.ok) throw new Error(`Discord monitor notification failed: ${response.status}`);
 }
 
+async function saveMonitorStateWhenChanged(env, key, previous, ok, state) {
+  const previousState = previous?.state || (previous?.ok === false ? "unhealthy" : previous?.ok === true ? "healthy" : "unknown");
+  if (previousState === state) return previousState;
+  await env.LOGIN_LOG_STATE.put(key, JSON.stringify({
+    ok,
+    state,
+    checkedAt: new Date().toISOString(),
+  }));
+  return previousState;
+}
+
 async function probe(url, validate = (response) => response.ok) {
   const started = Date.now();
   try {
@@ -989,8 +1000,7 @@ async function monitorServices(env) {
     const key = `service-monitor:${check.id}`;
     const previous = await env.LOGIN_LOG_STATE.get(key, "json");
     const state = result.ok ? "healthy" : "unhealthy";
-    const previousState = previous?.state || (previous?.ok === false ? "unhealthy" : previous?.ok === true ? "healthy" : "unknown");
-    await env.LOGIN_LOG_STATE.put(key, JSON.stringify({ ok: result.ok, state, checkedAt: new Date().toISOString() }));
+    const previousState = await saveMonitorStateWhenChanged(env, key, previous, result.ok, state);
     if ((!result.ok && previousState !== "unhealthy") || (result.ok && previousState === "unhealthy") || (result.ok && previousState === "sleeping")) {
       const status = previousState === "sleeping" && result.ok ? "☀️ 服務已啟動" : result.ok ? "✅ 服務已恢復" : "🚨 服務異常";
       await postDiscordMonitor(env, `${status}\n項目：${check.name}\n結果：${result.detail}\n時間：${nowText()}`);
@@ -1002,7 +1012,7 @@ async function monitorServices(env) {
     const previous = await env.LOGIN_LOG_STATE.get(key, "json");
     const previousState = previous?.state || (previous?.ok === false ? "unhealthy" : previous?.ok === true ? "healthy" : "unknown");
     const state = apiHealthy ? "sleeping" : "unhealthy";
-    await env.LOGIN_LOG_STATE.put(key, JSON.stringify({ ok: apiHealthy, state, checkedAt: new Date().toISOString() }));
+    await saveMonitorStateWhenChanged(env, key, previous, apiHealthy, state);
     if (apiHealthy && previousState !== "sleeping" && previousState !== "unhealthy") {
       await postDiscordMonitor(env, `🌙 服務休眠中\n項目：api.leokuo.com｜CPBL 比賽資料／Vercel Proxy\n結果：依排程暫停資料抓取（01:00–13:00）\n時間：${nowText()}`);
     }
